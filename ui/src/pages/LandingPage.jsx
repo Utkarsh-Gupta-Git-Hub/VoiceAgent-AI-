@@ -23,7 +23,10 @@ import {
   Smile,
   Mic,
   X,
+  Loader2,
 } from "lucide-react";
+import { Room, RoomEvent } from "livekit-client";
+import { api } from "../services/api";
 import { useAuth } from "../context/AuthContext";
 import { useTheme } from "../context/ThemeContext";
 import VoiceOrb3D from "../components/VoiceOrb3D";
@@ -37,8 +40,14 @@ export default function LandingPage({ onLaunchConsole }) {
   const [showWebRTCDemo, setShowWebRTCDemo] = useState(false);
   const [demoDuration, setDemoDuration] = useState(0);
   const [demoActive, setDemoActive] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState("Ready to test speech pipeline");
+  const [errorMessage, setErrorMessage] = useState(null);
 
   const timerRef = useRef(null);
+  const roomRef = useRef(null);
+  const audioElementsRef = useRef([]);
 
   const sampleAudios = {
     b2b: {
@@ -65,22 +74,170 @@ export default function LandingPage({ onLaunchConsole }) {
     setIsPlayingAudio((prev) => !prev);
   };
 
-  const startDemoCall = () => {
-    setDemoActive(true);
-    setDemoDuration(0);
-    timerRef.current = setInterval(() => {
-      setDemoDuration((d) => d + 1);
-    }, 1000);
+  const startDemoCall = async () => {
+    try {
+      setIsConnecting(true);
+      setErrorMessage(null);
+      setConnectionStatus("Requesting LiveKit connection...");
+
+      // 1. Fetch token
+      const roomName = `room_landing_${Date.now().toString(36)}`;
+      const participantName = user?.full_name || "Demo Visitor";
+      const tokenData = await api.getLiveKitToken(roomName, participantName);
+
+      if (!tokenData || !tokenData.token) {
+        throw new Error("Could not retrieve LiveKit connection token");
+      }
+
+      setConnectionStatus("Connecting to LiveKit WebRTC...");
+      const room = new Room({
+        adaptiveStream: true,
+        dynacast: true,
+        audioCaptureDefaults: {
+          autoGainControl: true,
+          echoCancellation: true,
+          noiseSuppression: true,
+        },
+      });
+
+      room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
+        if (track.kind === "audio") {
+          const el = track.attach();
+          el.autoplay = true;
+          document.body.appendChild(el);
+          audioElementsRef.current.push(el);
+
+          // Block microphone while agent is speaking to prevent disruption/echo
+          el.onplaying = () => {
+            setIsAgentSpeaking(true);
+            setConnectionStatus("Sarah is speaking...");
+            if (room.localParticipant) {
+              room.localParticipant.setMicrophoneEnabled(false);
+            }
+          };
+
+          // Quick turn on microphone after agent finishes delivery
+          el.onended = () => {
+            setIsAgentSpeaking(false);
+            setConnectionStatus("Listening to your mic...");
+            if (room.localParticipant) {
+              room.localParticipant.setMicrophoneEnabled(true);
+            }
+          };
+
+          el.onpause = () => {
+            setIsAgentSpeaking(false);
+            setConnectionStatus("Listening to your mic...");
+            if (room.localParticipant) {
+              room.localParticipant.setMicrophoneEnabled(true);
+            }
+          };
+        }
+      });
+
+      room.on(RoomEvent.TrackUnsubscribed, (track) => {
+        track.detach().forEach((el) => {
+          try {
+            el.pause();
+            el.remove();
+          } catch (_) {}
+        });
+        setIsAgentSpeaking(false);
+        setConnectionStatus("Listening to your mic...");
+        if (room.localParticipant) {
+          room.localParticipant.setMicrophoneEnabled(true);
+        }
+      });
+
+      room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+        const hasAgent = speakers.some((s) => !s.isLocal);
+        setIsAgentSpeaking(hasAgent);
+        if (room.localParticipant) {
+          if (hasAgent) {
+            // Block mic while agent speaks
+            room.localParticipant.setMicrophoneEnabled(false);
+            setConnectionStatus("Sarah is speaking...");
+          } else {
+            // Instantly re-enable mic once agent finishes speaking
+            room.localParticipant.setMicrophoneEnabled(true);
+            setConnectionStatus("Listening to your mic...");
+          }
+        }
+      });
+
+      room.on(RoomEvent.Disconnected, () => {
+        endDemoCall();
+      });
+
+      // 2. Connect to room & enable microphone
+      await room.connect(tokenData.serverUrl, tokenData.token);
+      setConnectionStatus("Activating microphone...");
+      await room.localParticipant.setMicrophoneEnabled(true);
+
+      roomRef.current = room;
+      setDemoActive(true);
+      setIsConnecting(false);
+      setConnectionStatus("Connected • Speak in English or Hinglish");
+
+      setDemoDuration(0);
+      if (timerRef.current) clearInterval(timerRef.current);
+      timerRef.current = setInterval(() => {
+        setDemoDuration((d) => d + 1);
+      }, 1000);
+    } catch (err) {
+      console.error("LiveKit connection error:", err);
+      endDemoCall();
+      setIsConnecting(false);
+      const isMicDenied =
+        err.name === "NotAllowedError" ||
+        (err.message && err.message.toLowerCase().includes("permission denied"));
+
+      if (isMicDenied) {
+        setErrorMessage(
+          "Microphone access blocked: Please click the lock or settings icon next to http://localhost:5173 in your address bar and allow Microphone access."
+        );
+      } else {
+        setErrorMessage(err.message || "Failed to connect to Sarah's voice stream");
+      }
+    }
   };
 
   const endDemoCall = () => {
+    if (roomRef.current) {
+      try {
+        roomRef.current.disconnect();
+      } catch (_) {}
+      roomRef.current = null;
+    }
+    audioElementsRef.current.forEach((el) => {
+      try {
+        el.pause();
+        el.remove();
+      } catch (_) {}
+    });
+    audioElementsRef.current = [];
     setDemoActive(false);
+    setIsConnecting(false);
+    setIsAgentSpeaking(false);
+    setConnectionStatus("Ready to test speech pipeline");
     if (timerRef.current) clearInterval(timerRef.current);
   };
 
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
+      if (roomRef.current) {
+        try {
+          roomRef.current.disconnect();
+        } catch (_) {}
+      }
+      audioElementsRef.current.forEach((el) => {
+        try {
+          el.pause();
+          el.remove();
+        } catch (_) {}
+      });
+      audioElementsRef.current = [];
     };
   }, []);
 
@@ -774,15 +931,41 @@ export default function LandingPage({ onLaunchConsole }) {
             </div>
 
             <div style={{ display: "flex", justifyContent: "center", marginBottom: "16px" }}>
-              <VoiceOrb3D size={180} isActive={true} isSpeaking={demoActive} />
+              <VoiceOrb3D size={180} isActive={true} isSpeaking={isAgentSpeaking} />
             </div>
 
             <h4 style={{ fontSize: "20px", fontWeight: 800, color: "var(--text-accent)", margin: "0 0 6px 0" }}>
               Sarah (VoiceAgent AI)
             </h4>
-            <p style={{ fontSize: "13px", color: "var(--text-muted)", margin: "0 0 16px 0" }}>
-              {demoActive ? "Connected via Browser Microphone & Opus Stream" : "Ready to test speech pipeline"}
-            </p>
+
+            <div style={{ display: "inline-flex", alignItems: "center", gap: "6px", marginBottom: "12px" }}>
+              {demoActive && (
+                <span
+                  className="live-dot"
+                  style={{ background: isAgentSpeaking ? "var(--sarvam-orange)" : "#34d399" }}
+                ></span>
+              )}
+              <p style={{ fontSize: "13px", color: isAgentSpeaking ? "var(--sarvam-orange)" : (demoActive ? "#34d399" : "var(--text-muted)"), margin: 0, fontWeight: demoActive ? 600 : 400 }}>
+                {connectionStatus}
+              </p>
+            </div>
+
+            {errorMessage && (
+              <div
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: "8px",
+                  background: "rgba(239, 68, 68, 0.15)",
+                  border: "1px solid rgba(239, 68, 68, 0.3)",
+                  color: "#ef4444",
+                  fontSize: "12px",
+                  marginBottom: "16px",
+                  textAlign: "center",
+                }}
+              >
+                {errorMessage}
+              </div>
+            )}
 
             {demoActive && (
               <div style={{ fontFamily: "var(--font-mono)", fontSize: "28px", fontWeight: 700, color: "var(--sarvam-orange)", marginBottom: "20px" }}>
@@ -792,9 +975,23 @@ export default function LandingPage({ onLaunchConsole }) {
 
             <div style={{ display: "flex", justifyContent: "center", gap: "12px" }}>
               {!demoActive ? (
-                <button className="btn btn-primary" onClick={startDemoCall} style={{ padding: "12px 28px" }}>
-                  <Mic size={16} />
-                  <span>Start Conversation</span>
+                <button
+                  className="btn btn-primary"
+                  onClick={startDemoCall}
+                  disabled={isConnecting}
+                  style={{ padding: "12px 28px" }}
+                >
+                  {isConnecting ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      <span>Connecting...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Mic size={16} />
+                      <span>Start Conversation</span>
+                    </>
+                  )}
                 </button>
               ) : (
                 <button className="btn btn-danger" onClick={endDemoCall} style={{ padding: "12px 28px" }}>

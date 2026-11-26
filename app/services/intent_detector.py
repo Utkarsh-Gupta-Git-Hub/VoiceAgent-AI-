@@ -23,26 +23,33 @@ class IntentDetector:
             "don't call", "dont call", "remove my number", "remove",
             "bye", "goodbye", "hang up", "stop calling", "wrong number"
         ]
-        if any(phrase in lower for phrase in disconnect_phrases):
+        if any(self._has_phrase(lower, phrase) for phrase in disconnect_phrases):
             logger.info(f"Disconnect intent detected: '{user_text}'")
             return self.END_CALL, None, "DISCONNECT"
 
         # 2. Callback request
         callback_phrases = ["call me later", "call back", "call later", "not now", "call after", "driving"]
-        if any(phrase in lower for phrase in callback_phrases):
+        if any(self._has_phrase(lower, phrase) for phrase in callback_phrases):
             callback_time = datetime.utcnow() + timedelta(hours=2)
             reply = "No problem at all! We will call you back in a couple of hours. Have a great day!"
             return reply, callback_time, "CALLBACK"
 
         # 3. Demo Booking intent
-        booking_keywords = ["book", "demo", "schedule", "o'clock", "pm", "am", "tomorrow", "today", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
-        if any(kw in lower for kw in booking_keywords):
+        # Whole-word matching only: "am" inside "I am Lily" must NOT count as a time.
+        booking_keywords = ["book", "demo", "schedule", "o'clock", "tomorrow", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
+        has_clock_time = re.search(r"\d{1,2}(:\d{2})?\s?(am|pm|a\.m\.|p\.m\.)", lower) is not None
+        if has_clock_time or any(self._has_phrase(lower, kw) for kw in booking_keywords):
             scheduled_time = self._parse_scheduled_time(lower)
             time_speech = self._format_time_for_speech(scheduled_time)
             reply = f"Thank you so much! Your demo has been scheduled for {time_speech}. We look forward to speaking with you. Have a great day! Goodbye!"
             return reply, scheduled_time, "BOOKING"
 
         return None, None, None
+
+    @staticmethod
+    def _has_phrase(text: str, phrase: str) -> bool:
+        """True if `phrase` appears as whole word(s) in `text` (not as a substring of another word)."""
+        return re.search(r"(?<![a-z0-9])" + re.escape(phrase) + r"(?![a-z0-9])", text) is not None
 
     def _parse_scheduled_time(self, text: str) -> datetime:
         dt = datetime.now()

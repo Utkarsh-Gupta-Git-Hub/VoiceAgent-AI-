@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     PORT: int = 8000
     HOST: str = "0.0.0.0"
     ENV: str = "development"
+    PUBLIC_WS_URL: Optional[str] = None  # e.g. wss://<ngrok-domain>/ws/voice-bot
 
     # ── LiveKit WebRTC ────────────────────────────────────────────────────────
     LIVEKIT_URL: str = "wss://your-livekit-cloud-url.livekit.cloud"
@@ -51,6 +52,8 @@ class Settings(BaseSettings):
     EXOTEL_API_TOKEN: Optional[str] = None
     EXOTEL_CALLER_ID: Optional[str] = None
     EXOTEL_APP_ID: Optional[str] = None
+    EXOTEL_EXOML_URL: Optional[str] = None
+    EXOTEL_BASE_URL: str = "https://api.exotel.com"  # use https://api.in.exotel.com for India region
 
     # ── WhatsApp Cloud API ────────────────────────────────────────────────────
     WHATSAPP_ACCESS_TOKEN: Optional[str] = None

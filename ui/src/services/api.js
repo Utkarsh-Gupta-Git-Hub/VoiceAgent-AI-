@@ -97,6 +97,13 @@ class ApiService {
     return this.request("/api/calls");
   }
 
+  getLiveKitToken(roomName = "", participantName = "") {
+    let q = "/api/token?";
+    if (roomName) q += `room_name=${encodeURIComponent(roomName)}&`;
+    if (participantName) q += `participant_name=${encodeURIComponent(participantName)}&`;
+    return this.request(q);
+  }
+
   triggerOutboundCall(to, customField = "") {
     return this.request("/api/calls/outbound", {
       method: "POST",

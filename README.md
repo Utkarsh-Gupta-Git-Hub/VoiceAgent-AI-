@@ -17,6 +17,39 @@ An AI-powered voice agent ("Sarah") that autonomously dials Indian business lead
 
 ---
 
+## 🚀 Quick Start (Windows, one double-click)
+
+1. Clone or download this repository.
+2. Double-click **`setup_and_run.bat`**.
+3. When Notepad opens (first run only), paste your API keys into `.env`, save, and close Notepad.
+
+Or from PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup_and_run.ps1
+```
+
+The script does everything in order and is safe to run again:
+
+1. Finds or installs Python 3.10–3.13, Node.js 20.19+ and `cloudflared` (via `winget`)
+2. Creates `.env` from `.env.example` and opens Notepad so you can add your API keys
+3. Creates a Python virtual environment and installs backend packages
+4. Installs UI packages
+5. Opens a free public Cloudflare tunnel so Exotel can reach your laptop
+6. Writes the tunnel address into `.env` (`PUBLIC_WS_URL`)
+7. Starts the backend (port **8001**) and UI (port **5173**)
+8. Opens **http://127.0.0.1:5173** in your browser
+
+Then sign up, add a contact, and place a call. After the call, open **Call Logs** and **Bookings** to see the transcript and the AI post-call analysis.
+
+Stop everything by double-clicking **`stop.bat`**.
+
+The first run takes 5–10 minutes (package downloads). Later runs start in about a minute. The tunnel address changes on every run; the script updates `.env` automatically.
+
+**Required keys in `.env`:** `SARVAM_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, and the `EXOTEL_*` values. The real `.env` is git-ignored, so never commit it. Logs are written to `backend.log`, `ui.err.log` and `cloudflared.log` in the project folder.
+
+---
+
 ## 🏗️ Architecture
 
 ```

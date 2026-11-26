@@ -25,17 +25,20 @@ export default function CallLogs() {
 
   useEffect(() => {
     fetchCalls();
+    // Post-call analysis arrives a few seconds after hang-up: refresh quietly.
+    const timer = setInterval(() => fetchCalls(true), 10000);
+    return () => clearInterval(timer);
   }, []);
 
-  const fetchCalls = async () => {
+  const fetchCalls = async (silent = false) => {
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       const data = await api.getCalls();
       setCalls(data || []);
     } catch (err) {
-      showToast(err.message, "error");
+      if (!silent) showToast(err.message, "error");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 

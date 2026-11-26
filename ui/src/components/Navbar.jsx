@@ -13,23 +13,39 @@ import {
   Sun,
   Moon,
   Globe,
+  Loader2,
+  Volume2,
 } from "lucide-react";
+import { Room, RoomEvent } from "livekit-client";
 import { api } from "../services/api";
 import { useToast } from "./Toast";
 import { useTheme } from "../context/ThemeContext";
+import { useAuth } from "../context/AuthContext";
 import VoiceOrb3D from "./VoiceOrb3D";
 
 export default function Navbar({ title, onCallTriggered, onViewLanding }) {
   const { theme, toggleTheme } = useTheme();
+  const { user } = useAuth();
   const { showToast } = useToast();
   const [showStudioModal, setShowStudioModal] = useState(false);
   const [testMode, setTestMode] = useState("webrtc"); // "webrtc" or "pstn"
   const [phoneNumber, setPhoneNumber] = useState("+91");
   const [isCalling, setIsCalling] = useState(false);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
   const [callSession, setCallSession] = useState(null);
   const [callDuration, setCallDuration] = useState(0);
 
   const timerRef = useRef(null);
+  const roomRef = useRef(null);
+  const audioElementsRef = useRef([]);
+
+  // Listen for global open:voice-studio trigger from Dashboard
+  useEffect(() => {
+    const handleOpenStudio = () => setShowStudioModal(true);
+    window.addEventListener("open:voice-studio", handleOpenStudio);
+    return () => window.removeEventListener("open:voice-studio", handleOpenStudio);
+  }, []);
 
   useEffect(() => {
     if (isCalling) {
@@ -45,6 +61,22 @@ export default function Navbar({ title, onCallTriggered, onViewLanding }) {
     };
   }, [isCalling]);
 
+  // Clean up LiveKit audio and room on unmount
+  useEffect(() => {
+    return () => {
+      if (roomRef.current) {
+        roomRef.current.disconnect();
+      }
+      audioElementsRef.current.forEach((el) => {
+        try {
+          el.pause();
+          el.remove();
+        } catch (_) {}
+      });
+      audioElementsRef.current = [];
+    };
+  }, []);
+
   const formatDuration = (secs) => {
     const m = Math.floor(secs / 60);
     const s = secs % 60;
@@ -52,34 +84,158 @@ export default function Navbar({ title, onCallTriggered, onViewLanding }) {
   };
 
   const handleStartCall = async (e) => {
-    e.preventDefault();
+    if (e) e.preventDefault();
+    if (isConnecting || isCalling) return;
     try {
-      setIsCalling(true);
-      const destination = testMode === "webrtc" ? "Browser WebRTC User" : phoneNumber;
+      setIsConnecting(true);
 
-      const res = await api.triggerOutboundCall(
-        destination,
-        testMode === "webrtc" ? "Interactive WebRTC Studio Test" : "PSTN Mobile Carrier Test"
-      );
+      if (testMode === "webrtc") {
+        // ── 1. Fetch live WebRTC token from backend ──
+        const roomName = `room_studio_${user?.id || "guest"}_${Date.now().toString(36)}`;
+        const participantName = user?.full_name || "Console User";
 
-      setCallSession(res);
-      showToast(
-        testMode === "webrtc"
-          ? "Live WebRTC audio channel connected with Sarah!"
-          : `Outbound PSTN call dispatched to ${phoneNumber}`,
-        "success"
-      );
+        const tokenData = await api.getLiveKitToken(roomName, participantName);
+        if (!tokenData || !tokenData.token) {
+          throw new Error("Could not retrieve LiveKit connection token");
+        }
+
+        // ── 2. Create LiveKit Room instance ──
+        const room = new Room({
+          adaptiveStream: true,
+          dynacast: true,
+          audioCaptureDefaults: {
+            autoGainControl: true,
+            echoCancellation: true,
+            noiseSuppression: true,
+          },
+        });
+
+        // Attach remote audio track when Sarah speaks
+        room.on(RoomEvent.TrackSubscribed, (track, publication, participant) => {
+          if (track.kind === "audio") {
+            const el = track.attach();
+            el.autoplay = true;
+            document.body.appendChild(el);
+            audioElementsRef.current.push(el);
+
+            // Block microphone while agent is delivering message to prevent audio disruption/echo
+            el.onplaying = () => {
+              setIsAgentSpeaking(true);
+              if (room.localParticipant) {
+                room.localParticipant.setMicrophoneEnabled(false);
+              }
+            };
+
+            // Immediately unmute microphone after message delivery is complete
+            el.onended = () => {
+              setIsAgentSpeaking(false);
+              if (room.localParticipant) {
+                room.localParticipant.setMicrophoneEnabled(true);
+              }
+            };
+
+            el.onpause = () => {
+              setIsAgentSpeaking(false);
+              if (room.localParticipant) {
+                room.localParticipant.setMicrophoneEnabled(true);
+              }
+            };
+          }
+        });
+
+        room.on(RoomEvent.TrackUnsubscribed, (track) => {
+          track.detach().forEach((el) => {
+            try {
+              el.pause();
+              el.remove();
+            } catch (_) {}
+          });
+          setIsAgentSpeaking(false);
+          if (room.localParticipant) {
+            room.localParticipant.setMicrophoneEnabled(true);
+          }
+        });
+
+        // Fast speaker tracking: block mic when agent speaks, quick unblock when agent stops
+        room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+          const hasAgent = speakers.some((s) => !s.isLocal);
+          setIsAgentSpeaking(hasAgent);
+          if (room.localParticipant) {
+            if (hasAgent) {
+              room.localParticipant.setMicrophoneEnabled(false);
+            } else {
+              room.localParticipant.setMicrophoneEnabled(true);
+            }
+          }
+        });
+
+        room.on(RoomEvent.Disconnected, () => {
+          cleanupSession();
+        });
+
+        // ── 3. Connect to room & publish local mic ──
+        await room.connect(tokenData.serverUrl, tokenData.token);
+        await room.localParticipant.setMicrophoneEnabled(true);
+
+        roomRef.current = room;
+        setIsCalling(true);
+        setIsConnecting(false);
+
+        showToast("Connected to Sarah! Speak into your microphone.", "success");
+      } else {
+        // ── Mobile Phone (PSTN) Mode ──
+        const res = await api.triggerOutboundCall(
+          phoneNumber,
+          "PSTN Mobile Carrier Test"
+        );
+        setCallSession(res);
+        setIsCalling(true);
+        setIsConnecting(false);
+        showToast(`Outbound PSTN call dispatched to ${phoneNumber}`, "success");
+      }
+
       if (onCallTriggered) onCallTriggered();
     } catch (err) {
+      cleanupSession();
+      setIsConnecting(false);
       setIsCalling(false);
-      showToast(`Call initiation failed: ${err.message}`, "error");
+      const isMicDenied =
+        err.name === "NotAllowedError" ||
+        (err.message && err.message.toLowerCase().includes("permission denied"));
+
+      if (isMicDenied) {
+        showToast(
+          "Microphone permission blocked. Please allow microphone access in your browser address bar.",
+          "error"
+        );
+      } else {
+        showToast(`Call initiation failed: ${err.message}`, "error");
+      }
     }
   };
 
-  const handleEndCall = () => {
+  const cleanupSession = () => {
+    if (roomRef.current) {
+      try {
+        roomRef.current.disconnect();
+      } catch (_) {}
+      roomRef.current = null;
+    }
+    audioElementsRef.current.forEach((el) => {
+      try {
+        el.pause();
+        el.remove();
+      } catch (_) {}
+    });
+    audioElementsRef.current = [];
+    setIsAgentSpeaking(false);
     setIsCalling(false);
-    showToast(`Test call ended (${formatDuration(callDuration)}).`, "info");
     setCallSession(null);
+  };
+
+  const handleEndCall = () => {
+    cleanupSession();
+    showToast(`Test call ended (${formatDuration(callDuration)}).`, "info");
   };
 
   return (
@@ -235,21 +391,23 @@ export default function Navbar({ title, onCallTriggered, onViewLanding }) {
               <div style={{ textAlign: "center", padding: "8px 0" }}>
                 {/* 3D Neural Voice Orb */}
                 <div style={{ display: "flex", justifyContent: "center", marginBottom: "12px" }}>
-                  <VoiceOrb3D size={160} isActive={true} isSpeaking={isCalling} />
+                  <VoiceOrb3D size={160} isActive={true} isSpeaking={isAgentSpeaking} />
                 </div>
 
                 <div style={{ display: "inline-flex", alignItems: "center", gap: "6px", marginBottom: "8px" }}>
-                  <span className="live-dot"></span>
-                  <span style={{ fontSize: "12px", fontWeight: 700, color: "#34d399", textTransform: "uppercase", letterSpacing: "0.5px" }}>
-                    {testMode === "webrtc" ? "Live WebRTC Audio Channel Active" : "Carrier Dial Connected"}
+                  <span className="live-dot" style={{ background: isAgentSpeaking ? "var(--sarvam-orange)" : "#34d399" }}></span>
+                  <span style={{ fontSize: "12px", fontWeight: 700, color: isAgentSpeaking ? "var(--sarvam-orange)" : "#34d399", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                    {testMode === "webrtc"
+                      ? (isAgentSpeaking ? "Sarah is speaking..." : "Listening to your mic...")
+                      : "Carrier Dial Connected"}
                   </span>
                 </div>
 
-                <h4 style={{ fontSize: "20px", fontWeight: 800, color: "#ffffff", margin: "0 0 4px 0" }}>
+                <h4 style={{ fontSize: "20px", fontWeight: 800, color: "var(--text-accent)", margin: "0 0 4px 0" }}>
                   Sarah (VoiceAgent AI)
                 </h4>
                 <p style={{ fontSize: "13px", color: "var(--text-muted)", margin: "0 0 16px 0" }}>
-                  {testMode === "webrtc" ? "Connected via Browser Microphone & Opus" : `Calling ${phoneNumber}`}
+                  {testMode === "webrtc" ? "Live WebRTC Audio Channel • Speak in English or Hinglish" : `Calling ${phoneNumber}`}
                 </p>
 
                 {/* Duration Counter */}
@@ -286,7 +444,7 @@ export default function Navbar({ title, onCallTriggered, onViewLanding }) {
                   <div>VAD: <span style={{ color: "#ffffff" }}>Silero (150ms)</span></div>
                   <div>TTS: <span style={{ color: "#ffffff" }}>Deepgram Aura (118ms)</span></div>
                   <div>LLM: <span style={{ color: "#ffffff" }}>Sarvam 105B / 4o-mini</span></div>
-                  <div>Guard: <span style={{ color: "#34d399" }}>PromptGuard Active</span></div>
+                  <div>Status: <span style={{ color: isAgentSpeaking ? "var(--sarvam-orange)" : "#34d399" }}>{isAgentSpeaking ? "Agent Speaking" : "Mic Open"}</span></div>
                 </div>
 
                 <button
@@ -409,11 +567,21 @@ export default function Navbar({ title, onCallTriggered, onViewLanding }) {
 
                 <button
                   type="submit"
+                  disabled={isConnecting || isCalling}
                   className="btn btn-primary"
                   style={{ width: "100%", padding: "12px", fontSize: "13.5px" }}
                 >
-                  <PhoneCall size={16} />
-                  <span>Start Live Voice Test</span>
+                  {isConnecting ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      <span>Connecting LiveKit Channel...</span>
+                    </>
+                  ) : (
+                    <>
+                      <PhoneCall size={16} />
+                      <span>Start Live Voice Test</span>
+                    </>
+                  )}
                 </button>
               </form>
             )}

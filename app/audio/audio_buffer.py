@@ -10,7 +10,7 @@ class AudioBuffer:
     Stateful audio buffer that detects speech onset, holds pre-speech audio,
     detects silence turn completion, and signals instant user barge-in.
     """
-    def __init__(self, sample_rate: int = 16000, silence_hangover_ms: int = 500, speech_threshold_rms: float = 450.0):
+    def __init__(self, sample_rate: int = 16000, silence_hangover_ms: int = 350, speech_threshold_rms: float = 450.0):
         self.sample_rate = sample_rate
         self.silence_hangover_ms = silence_hangover_ms
         self.speech_threshold_rms = speech_threshold_rms
@@ -27,6 +27,9 @@ class AudioBuffer:
         self.last_speech_time = 0
         self.barge_in_triggered = False
         self.ambient_noise_rms = 150.0
+        # Barge-in needs sustained loud audio so line noise / clicks don't cut the bot off.
+        self.barge_in_min_ms = 700
+        self._loud_ms = 0.0
 
     def append(self, chunk: bytes):
         if not chunk:
@@ -39,10 +42,13 @@ class AudioBuffer:
 
         effective_threshold = max(self.speech_threshold_rms, self.ambient_noise_rms * 2.2)
 
+        chunk_ms = len(chunk) / max(self.bytes_per_ms, 1)
         if rms >= effective_threshold:
+            self._loud_ms += chunk_ms
+            if self._loud_ms >= self.barge_in_min_ms:
+                self.barge_in_triggered = True
             if not self.speech_detected:
                 self.speech_detected = True
-                self.barge_in_triggered = True
                 logger.debug(f"User speech onset detected (RMS={int(rms)}, threshold={int(effective_threshold)})")
                 if len(self.pre_speech_buffer) > 0:
                     self.buffer.extend(self.pre_speech_buffer)
@@ -51,6 +57,7 @@ class AudioBuffer:
             self.last_speech_time = time.time()
             self.buffer.extend(chunk)
         else:
+            self._loud_ms = 0.0
             if self.speech_detected:
                 # Inside speech pause window
                 self.buffer.extend(chunk)
@@ -87,6 +94,7 @@ class AudioBuffer:
         self.speech_detected = False
         self.last_speech_time = 0
         self.barge_in_triggered = False
+        self._loud_ms = 0.0
 
     def _calculate_rms(self, pcm_bytes: bytes) -> float:
         if len(pcm_bytes) < 2:

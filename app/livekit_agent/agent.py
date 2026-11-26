@@ -272,12 +272,21 @@ async def entrypoint(ctx: JobContext) -> None:
     # 1. Connect to room audio (WebRTC UDP / Opus)
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
-    # 2. Resolve user_id from room metadata (set by call_router)
+    # 2. Resolve user_id and caller name from room or participant metadata
     user_id: Optional[int] = None
+    to_number: Optional[str] = None
     try:
         import json as _json
         meta = _json.loads(ctx.room.metadata or "{}")
         user_id = meta.get("user_id")
+        to_number = meta.get("to_number")
+        if not user_id or not to_number:
+            for p in ctx.room.remote_participants.values():
+                p_meta = _json.loads(p.metadata or "{}")
+                if not user_id and p_meta.get("user_id"):
+                    user_id = p_meta.get("user_id")
+                if not to_number and (p_meta.get("to_number") or p_meta.get("caller_name")):
+                    to_number = p_meta.get("to_number") or p_meta.get("caller_name")
     except Exception:
         pass
 
@@ -292,26 +301,28 @@ async def entrypoint(ctx: JobContext) -> None:
             f"({active_content.content_type}) for user {user_id}"
         )
 
-    # 4. Record call start in DB (fix: correct from/to fields)
-    to_number: Optional[str] = None
-    try:
-        meta_full = _json.loads(ctx.room.metadata or "{}")
-        to_number = meta_full.get("to_number")
-    except Exception:
-        pass
-
+    # 4. Record call start in DB (idempotent upsert so we don't duplicate pre-recorded calls)
     try:
         async with AsyncSessionLocal() as db:
-            call_rec = Call(
-                call_sid=room_name,
-                user_id=user_id,
-                from_number="VoiceAgent-AI",   # Fixed: Sarah is the caller
-                to_number=to_number,            # Fixed: destination is the lead's number
-                status=CallStatus.IN_PROGRESS,
-                direction="INBOUND" if "console" in room_name else "OUTBOUND",
-                start_time=datetime.now(timezone.utc),
-            )
-            db.add(call_rec)
+            c_res = await db.execute(select(Call).where(Call.call_sid == room_name))
+            call_rec = c_res.scalars().first()
+            if not call_rec:
+                call_rec = Call(
+                    call_sid=room_name,
+                    user_id=user_id,
+                    from_number="VoiceAgent-AI",
+                    to_number=to_number or "Web-User",
+                    status=CallStatus.IN_PROGRESS,
+                    direction="INBOUND" if "console" in room_name else "OUTBOUND",
+                    start_time=datetime.now(timezone.utc),
+                )
+                db.add(call_rec)
+            else:
+                call_rec.status = CallStatus.IN_PROGRESS
+                if user_id and not call_rec.user_id:
+                    call_rec.user_id = user_id
+                if to_number and not call_rec.to_number:
+                    call_rec.to_number = to_number
             await db.commit()
     except Exception as exc:
         logger.warning(f"Could not initialise call record: {exc}")
@@ -341,27 +352,29 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     # 8. Instantiate agent with dynamic prompt + guard hooks
+    # Configured with allow_interruptions=False so agent speech delivery is never disrupted,
+    # and min_endpointing_delay=0.03 (30ms) for ultra-fast response after user stops speaking.
     agent = Agent(
         instructions=system_prompt,
-        vad=silero.VAD.load(min_speech_duration=0.15, min_silence_duration=0.35),
+        vad=silero.VAD.load(min_speech_duration=0.10, min_silence_duration=0.10),
         stt=deepgram.STT(api_key=settings.DEEPGRAM_API_KEY),
         llm=llm_instance,
         tts=tts_instance,
         tools=[book_demo],
-        allow_interruptions=True,
-        min_endpointing_delay=0.25,
-        max_endpointing_delay=0.55,
+        allow_interruptions=False,
+        min_endpointing_delay=0.03,
+        max_endpointing_delay=0.20,
     )
 
-    # 9. Session with preemptive generation for minimal turn latency
+    # 9. Session with 30ms endpointing delay for instant replies upon user silence
     session = AgentSession(
-        allow_interruptions=True,
+        allow_interruptions=False,
         min_interruption_duration=0.6,
         min_interruption_words=2,
         resume_false_interruption=True,
         preemptive_generation=True,
-        min_endpointing_delay=0.25,
-        max_endpointing_delay=0.55,
+        min_endpointing_delay=0.03,
+        max_endpointing_delay=0.20,
     )
 
     # ── Shutdown callback: persist turns, generate summary, broadcast event ──
@@ -481,7 +494,7 @@ async def entrypoint(ctx: JobContext) -> None:
         guard = inspect_agent_response(greeting)
         safe_greeting = guard.sanitized_text
         logger.info(f"🗣️ Sending greeting: {safe_greeting[:80]}...")
-        await session.say(safe_greeting, allow_interruptions=True)
+        await session.say(safe_greeting, allow_interruptions=False)
 
 
 def run_agent() -> None:

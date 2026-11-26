@@ -55,3 +55,6 @@ livekit-agent.log
 *.pid
 .tmp/
 tmp/
+
+# ── Launcher runtime files ───────────────────────────────────────────────────
+.run_pids

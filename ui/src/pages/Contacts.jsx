@@ -54,6 +54,7 @@ export default function Contacts() {
   };
 
   const handleCallNow = async (contact) => {
+    if (activeCall && (activeCall.status === "DIALING" || activeCall.status === "CONNECTED")) return;
     try {
       setActiveCall({
         contact,

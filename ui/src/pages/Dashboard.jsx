@@ -19,6 +19,7 @@ import {
   Activity,
   Cpu,
   Layers,
+  Mic,
 } from "lucide-react";
 import { api } from "../services/api";
 import VoiceOrb3D from "../components/VoiceOrb3D";
@@ -52,12 +53,16 @@ export default function Dashboard({ setActiveTab }) {
 
   const wsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
+  const unmountedRef = useRef(false);
 
   useEffect(() => {
+    unmountedRef.current = false;
     fetchDashboardData();
     setupWebSocket();
 
     return () => {
+      // Stop the onclose handler from scheduling a reconnect after leaving the page.
+      unmountedRef.current = true;
       if (wsRef.current) {
         wsRef.current.close();
       }
@@ -111,7 +116,7 @@ export default function Dashboard({ setActiveTab }) {
           } else if (data.event === "CALL_STARTED") {
             setLastLiveEvent(`📞 Call started: ${data.payload?.to || "Browser"}`);
             fetchDashboardData();
-          } else if (data.event === "CALL_ENDED") {
+          } else if (data.event === "CALL_ENDED" || data.event === "CALL_UPDATED") {
             setLastLiveEvent("Call ended & sentiment analyzed");
             fetchDashboardData();
           } else if (data.event === "LEAD_ADDED" || data.event === "LEAD_DELETED") {
@@ -124,6 +129,7 @@ export default function Dashboard({ setActiveTab }) {
 
       ws.onclose = () => {
         setWsConnected(false);
+        if (unmountedRef.current) return;
         reconnectTimeoutRef.current = setTimeout(() => {
           setupWebSocket();
         }, 5000);
@@ -385,6 +391,23 @@ export default function Dashboard({ setActiveTab }) {
                 whileHover={{ scale: 1.03 }}
                 whileTap={{ scale: 0.97 }}
                 className="btn btn-primary"
+                onClick={() => window.dispatchEvent(new CustomEvent("open:voice-studio"))}
+                style={{
+                  background: "linear-gradient(135deg, var(--sarvam-orange), #ea580c)",
+                  boxShadow: "0 4px 16px var(--sarvam-orange-glow)",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "7px",
+                  fontWeight: 700,
+                }}
+              >
+                <Mic size={15} />
+                <span>Test Voice Agent (Live)</span>
+              </motion.button>
+              <motion.button
+                whileHover={{ scale: 1.03 }}
+                whileTap={{ scale: 0.97 }}
+                className="btn btn-outline"
                 onClick={() => setActiveTab("content")}
               >
                 <Zap size={14} />
